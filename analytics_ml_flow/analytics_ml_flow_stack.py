@@ -16,8 +16,10 @@ from aws_cdk import (
     aws_lambda_python as lambda_python,
     core
 )
-
 from aws_solutions_constructs import aws_kinesis_streams_lambda  as kinesis_lambda
+
+from libs.firehose_lib import FirehoseProps, FirehoseLib
+from libs.glue_crawler_lib import GlueCrawlerLib, GlueCrawlerProps
 
 from common.configurations.glue_config import glue_column
 from utils import get_code
@@ -72,9 +74,9 @@ class AnalyticsMlFlowStack(core.Stack):
         # S3 Bucket
         self.bucket = s3.Bucket(
             self, 'data-clicks-lake',
-            removal_policy=core.RemovalPolicy.DESTROY
+            removal_policy=core.RemovalPolicy.DESTROY,
+            auto_delete_objects=True
         )
-        
 
         # Glue
         self.glue_db_analytical = glue.Database(
@@ -103,61 +105,18 @@ class AnalyticsMlFlowStack(core.Stack):
         )
 
         # Firehose
-        Stream = firehose.CfnDeliveryStream
-        ExtendedS3DestConfProp = Stream.ExtendedS3DestinationConfigurationProperty
-        FormatConversionProp = Stream.DataFormatConversionConfigurationProperty
-        InputFormatConfProp = Stream.InputFormatConfigurationProperty
-        OutputFormatConfProp = Stream.OutputFormatConfigurationProperty
-        DeserializerProperty = Stream.DeserializerProperty
-        SerializerProperty = Stream.SerializerProperty
-        OpenXJsonSerDeProperty = Stream.OpenXJsonSerDeProperty
-        ParquetSerDeProperty = Stream.ParquetSerDeProperty
-        BufferingHintsProp = Stream.BufferingHintsProperty
-        SchemaConfigProp = Stream.SchemaConfigurationProperty
-        SourceStreamProp = Stream.KinesisStreamSourceConfigurationProperty
-
         iam_role_firehose_analytical = self.create_firehose_role()
         self.bucket.grant_read_write(iam_role_firehose_analytical)
 
-        self.delivery_stream = firehose.CfnDeliveryStream(
-            self, 'deliveryClickstream',
-            delivery_stream_name='deliveryClickStream',
-            delivery_stream_type='KinesisStreamAsSource',
-            kinesis_stream_source_configuration=SourceStreamProp(
-                kinesis_stream_arn=self.stream_lambda.kinesis_stream.stream_arn,
-                role_arn=iam_role_firehose_analytical.role_arn
-                ),
-            extended_s3_destination_configuration=ExtendedS3DestConfProp(
-                bucket_arn=self.bucket.bucket_arn,
-                role_arn=iam_role_firehose_analytical.role_arn,
-                buffering_hints=BufferingHintsProp(
-                    interval_in_seconds=60,
-                    size_in_m_bs=128,
-                ),
-                data_format_conversion_configuration=FormatConversionProp(
-                    enabled=True,
-                    input_format_configuration=InputFormatConfProp(
-                        deserializer=DeserializerProperty(
-                            open_x_json_ser_de=OpenXJsonSerDeProperty(),
-                        ),
-                    ),
-                    output_format_configuration=OutputFormatConfProp(
-                        serializer=SerializerProperty(
-                            parquet_ser_de=ParquetSerDeProperty(
-                                compression='UNCOMPRESSED',
-                                enable_dictionary_compression=False,
-                            ),
-                        )
-                    ),
-                    schema_configuration=SchemaConfigProp(
-                        database_name=self.glue_db_analytical.database_name,
-                        table_name=self.glue_table_analytical.table_name,
-                        role_arn=iam_role_firehose_analytical.role_arn,
-                    )
-                ),
-                prefix='kinesis/'
-            ),
+        firehose_props = FirehoseProps(
+            bucket=self.bucket,
+            role=iam_role_firehose_analytical,
+            stream=self.stream_lambda.kinesis_stream,
+            glue_db=self.glue_db_analytical,
+            glue_table=self.glue_table_analytical
         )
+
+        self.firehose = FirehoseLib(self, 'firehose_clickstream', firehose_props)
 
         # Elasticsearch
         iam_es_statement = self.create_iam_statement_for_elasticsearch()
@@ -199,26 +158,10 @@ class AnalyticsMlFlowStack(core.Stack):
         self.stream_lambda.kinesis_stream.grant_read(self.send_data_to_elasticsearch)
         self.send_data_to_elasticsearch.add_event_source(stream_source)
 
-        crawler_role = self.create_crawler_permissions()
-        # Glue Cralwer Properties 
-        crawlerCfn = glue.CfnCrawler
-        targetProperty = crawlerCfn.TargetsProperty
-        S3TargetProperty = crawlerCfn.S3TargetProperty
-        ScheduleProperty = crawlerCfn.ScheduleProperty
-
         # Glue Crawler
-        self.glue_crawler = glue.CfnCrawler(
-            self, 'clickstream_crawler',
-            role=crawler_role.role_arn,
-            targets=targetProperty(
-                s3_targets=[S3TargetProperty(
-                    path=f's3://{self.bucket.bucket_name}/kinesis/'
-                )]
-            ),
-            database_name='clickstream_db',
-            name='clickstream',
-            schedule=ScheduleProperty(schedule_expression='cron(0 * ? * * *)')
-        )
+        crawler_role = self.create_crawler_permissions()
+        glue_props = GlueCrawlerProps(bucket=self.bucket, role=crawler_role)
+        self.glue_crawler = GlueCrawlerLib(self, 'glueCrawler', glue_props)
 
 
     def create_iam_statement_for_elasticsearch(self):
