@@ -20,6 +20,7 @@ from aws_solutions_constructs import aws_kinesis_streams_lambda  as kinesis_lamb
 
 from libs.firehose_lib import FirehoseProps, FirehoseLib
 from libs.glue_crawler_lib import GlueCrawlerLib, GlueCrawlerProps
+from libs.elasticsearch_lib import ElasticsearchLib
 
 from common.configurations.glue_config import glue_column
 from utils import get_code
@@ -67,7 +68,6 @@ class AnalyticsMlFlowStack(core.Stack):
             self, 'scheduledRule',
             schedule=events.Schedule.expression('rate(1 minute)')
         )
-
         self.event_rule.add_target(targets.LambdaFunction(self.produce_fake_data))
 
 
@@ -118,19 +118,8 @@ class AnalyticsMlFlowStack(core.Stack):
 
         self.firehose = FirehoseLib(self, 'firehose_clickstream', firehose_props)
 
-        # Elasticsearch
-        iam_es_statement = self.create_iam_statement_for_elasticsearch()
-
-        self.es_domain = elasticsearch.Domain(
-            self, 'ES_Domain',
-            version=elasticsearch.ElasticsearchVersion.V6_8,
-            access_policies=[iam_es_statement],
-            capacity=elasticsearch.CapacityConfig(
-                data_node_instance_type='m3.medium.elasticsearch',
-                data_nodes=2,
-                master_node_instance_type='m3.large.elasticsearch',
-                master_nodes=2)
-        )
+        # Elasticsearh
+        self.es_domain = ElasticsearchLib(self, 'ES-clickstream-domain').es_domain
 
         # Lambda to send data to Elasticsearch
         self.send_data_to_elasticsearch = lambda_python.PythonFunction(
@@ -162,19 +151,6 @@ class AnalyticsMlFlowStack(core.Stack):
         crawler_role = self.create_crawler_permissions()
         glue_props = GlueCrawlerProps(bucket=self.bucket, role=crawler_role)
         self.glue_crawler = GlueCrawlerLib(self, 'glueCrawler', glue_props)
-
-
-    def create_iam_statement_for_elasticsearch(self):
-        iam_es_statement = iam.PolicyStatement(
-            actions=[
-                'es:*'
-            ],
-            effect=iam.Effect.ALLOW
-        )
-        iam_es_statement.add_any_principal()
-        iam_es_statement.add_all_resources()
-        iam_es_statement.add_condition(key='IpAddress', value={"aws:SourceIp": "181.221.240.151/32"})
-        return iam_es_statement
 
     def create_firehose_role(self):
         # Principal
